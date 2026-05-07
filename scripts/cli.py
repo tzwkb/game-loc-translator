@@ -6,7 +6,7 @@ Usage: python cli.py <command> [args]
 Commands:
   ingest      Parse input file + glossary + KB into workspace
   retrieve    RAG corpus search
-  translate   Execute batch translation/optimization via API
+  process     Execute batch translation/optimization via API
   glossary    Post-process glossary enforcement
   export      Write final output xlsx
   diff        Generate 4-column diff (optimize mode)
@@ -87,13 +87,17 @@ def cmd_retrieve(args):
 
 async def cmd_translate_async(args):
     import asyncio
-    from ingest import get_pending_rows, update_row_result, get_project_meta
+    import sqlite3
+    from ingest import get_pending_rows, get_project_meta
     from engine import translate_batch, find_matching_terms
     from corpus_search import search_corpus
+    from export import export_xlsx
 
     rows = get_pending_rows()
     if not rows:
-        print("[translate] No pending rows.")
+        print("[process] No pending rows.")
+        # Still try auto-export in case everything was already done
+        _auto_export()
         return
 
     project_id = get_project_meta("project_id") or ""
@@ -101,71 +105,197 @@ async def cmd_translate_async(args):
     theme      = get_project_meta("theme") or ""
     lang_pair  = get_project_meta("lang_pair") or ""
     mode       = get_project_meta("mode") or "new"
-    style_anchor = args.style_anchor or ""
+    user_style_anchor = args.style_anchor or ""
 
-    # Load glossary
+    # Load glossary (resolve relative paths against project root)
     glossary = []
     gfile = get_project_meta("glossary_file")
     if gfile:
         from ingest import load_glossary
-        glossary = load_glossary(gfile)
+        gpath = Path(gfile)
+        if not gpath.is_absolute():
+            gpath = config.BASE_DIR / gfile
+        if gpath.exists():
+            glossary = load_glossary(str(gpath))
+        else:
+            print(f"[process] Glossary not found: {gpath}")
 
-    # Batch preparation
-    batch_size = config.BATCH_SIZE
-    semaphore = asyncio.Semaphore(config.MAX_WORKERS)
+    db_path = str(config.WORKSPACE_DIR / "workspace.db")
 
-    # Group rows into batches
-    batches = []
-    current = []
-    for r in rows:
-        current.append({
-            "label": r["id"],
-            "source": r["source"],
-            "draft": r.get("draft", ""),
-            "key": r.get("key", ""),
-        })
-        if len(current) >= batch_size:
-            batches.append(current)
-            current = []
-    if current:
-        batches.append(current)
+    # Pre-check corpus size to avoid loading embedding model for empty/small corpus
+    corpus_count = 0
+    try:
+        conn = sqlite3.connect(config.CORPUS_DB_PATH)
+        corpus_count = conn.execute("SELECT COUNT(*) FROM corpus").fetchone()[0]
+        conn.close()
+    except Exception:
+        pass
+    skip_rag = corpus_count < 10
+    if skip_rag:
+        print(f"[process] Corpus has {corpus_count} entries (< 10), skipping RAG.")
 
-    print(f"[translate] {len(rows)} rows -> {len(batches)} batches")
+    # Migrate DB: add change_type / change_reason if missing
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    for col in ["change_type", "change_reason"]:
+        try:
+            c.execute(f"ALTER TABLE rows ADD COLUMN {col} TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
+    conn.close()
 
-    # Process batches
-    for i, batch in enumerate(batches, 1):
-        # Per-batch glossary hints
-        batch_text = " ".join(r["source"] for r in batch)
-        glossary_hints = find_matching_terms(batch_text, glossary)
+    # -------------------------------------------------------------------------
+    # Helper: translate one row and update DB
+    # -------------------------------------------------------------------------
+    async def _translate_one(row, style_anchor_to_use, sem):
+        async with sem:
+            item = {
+                "label": row["id"],
+                "source": row["source"],
+                "draft": row.get("draft", ""),
+                "key": row.get("key", ""),
+            }
+            glossary_hints = find_matching_terms(row["source"], glossary)
+            rag_refs = []
+            if not skip_rag:
+                hits = search_corpus(row["source"], game_type, theme, lang_pair, top_k=3)
+                for h in hits:
+                    if h.similarity >= config.RAG_SIM_THRESHOLD:
+                        rag_refs.append((h.source, h.target))
 
-        # Per-batch RAG
-        rag_refs = []
-        if len(batch) > 0:
-            # Use first sentence as query proxy
-            hits = search_corpus(batch[0]["source"], game_type, theme, lang_pair, top_k=3)
-            for h in hits:
-                if h.similarity >= config.RAG_SIM_THRESHOLD:
-                    rag_refs.append((h.source, h.target))
+            best_result = {}
+            truncated = False
+            for attempt in range(3):
+                results = await translate_batch(
+                    batch_items=[item],
+                    mode=mode,
+                    project_id=project_id,
+                    style_anchor=style_anchor_to_use,
+                    glossary_hints=glossary_hints,
+                    rag_refs=rag_refs,
+                    semaphore=None,
+                )
+                # Systematic truncation: don't waste retries
+                if results.pop("_truncated", False):
+                    truncated = True
+                    print(f"    [WARN] Row {item['label']} truncated (max_tokens insufficient)")
+                    break
+                data = results.get(item["label"], {})
+                text = data.get("translation") if isinstance(data, dict) else str(data)
+                if text:
+                    best_result = data if isinstance(data, dict) else {"translation": text}
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
 
-        results = await translate_batch(
-            batch_items=batch,
-            mode=mode,
-            project_id=project_id,
-            style_anchor=style_anchor,
-            glossary_hints=glossary_hints,
-            rag_refs=rag_refs,
-            semaphore=semaphore,
-        )
-
-        for item in batch:
-            row_id = item["label"]
-            text = results.get(row_id)
-            if text:
-                update_row_result(row_id, text, "done")
+            text = best_result.get("translation", "") if isinstance(best_result, dict) else str(best_result)
+            if mode == "optimize" and isinstance(best_result, dict):
+                ctype = best_result.get("change_type", "") or ""
+                creason = best_result.get("change_reason", "") or ""
             else:
-                update_row_result(row_id, "", "failed")
+                ctype = ""
+                creason = ""
+            status = "done" if text else "failed"
 
-        print(f"  Batch {i}/{len(batches)} done")
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "UPDATE rows SET translation = ?, status = ?, change_type = ?, change_reason = ? WHERE id = ?",
+                (text, status, ctype, creason, item["label"])
+            )
+            conn.commit()
+            conn.close()
+            return status, text
+
+    # -------------------------------------------------------------------------
+    # Step 1: Identify first 10 non-locked rows as style anchor
+    # -------------------------------------------------------------------------
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    anchor_rows = conn.execute(
+        "SELECT * FROM rows WHERE locked = 0 ORDER BY row_num LIMIT 10"
+    ).fetchall()
+    conn.close()
+    anchor_rows = [dict(r) for r in anchor_rows]
+
+    effective_style_anchor = user_style_anchor
+
+    if anchor_rows:
+        pending_anchors = [r for r in anchor_rows if r.get("status") != "done"]
+        if pending_anchors:
+            print(f"[process] Translating {len(pending_anchors)} anchor rows (first 10) to establish style baseline...")
+            anchor_sem = asyncio.Semaphore(5)
+            await asyncio.gather(*[
+                _translate_one(r, user_style_anchor, anchor_sem) for r in pending_anchors
+            ])
+            print("[process] Anchor rows done.")
+
+        # Re-read anchor translations from DB
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        refreshed = conn.execute(
+            "SELECT * FROM rows WHERE locked = 0 ORDER BY row_num LIMIT 10"
+        ).fetchall()
+        conn.close()
+        refreshed = [dict(r) for r in refreshed]
+
+        samples = []
+        for r in refreshed:
+            trans = r["translation"] or ""
+            if trans:
+                if mode == "optimize":
+                    samples.append(
+                        f"SOURCE: {r['source']}\nDRAFT: {r.get('draft', '')}\nOPTIMIZED: {trans}"
+                    )
+                else:
+                    samples.append(
+                        f"SOURCE: {r['source']}\nTRANSLATION: {trans}"
+                    )
+        if samples:
+            auto_anchor = "【风格参考——前10行基准译文】\n" + "\n---\n".join(samples)
+            if user_style_anchor:
+                effective_style_anchor = user_style_anchor + "\n\n" + auto_anchor
+            else:
+                effective_style_anchor = auto_anchor
+            print(f"[process] Built style anchor from first {len(samples)} rows.")
+
+    # -------------------------------------------------------------------------
+    # Step 2: Translate remaining pending/failed rows
+    # -------------------------------------------------------------------------
+    remaining = get_pending_rows()
+    if remaining:
+        print(f"[process] {len(remaining)} remaining rows -> row-by-row mode")
+        main_sem = asyncio.Semaphore(config.MAX_WORKERS)
+
+        async def _process_row(idx, total, row):
+            status, _ = await _translate_one(row, effective_style_anchor, main_sem)
+            print(f"  {idx}/{total} done ({status})", flush=True)
+
+        tasks = [asyncio.create_task(_process_row(i + 1, len(remaining), r)) for i, r in enumerate(remaining)]
+        await asyncio.gather(*tasks)
+        print(f"[process] Completed {len(remaining)} rows.", flush=True)
+    else:
+        print("[process] No remaining rows to translate.")
+
+    # -------------------------------------------------------------------------
+    # Step 3: Auto-export
+    # -------------------------------------------------------------------------
+    _auto_export()
+
+
+def _auto_export():
+    """Export results if input file is recorded."""
+    from ingest import get_project_meta
+    input_file = get_project_meta("input_file")
+    if not input_file:
+        print("[process] No input file recorded, skipping auto-export.")
+        return
+    from export import export_xlsx
+    mode = get_project_meta("mode") or "new"
+    suffix = "_translated" if mode == "new" else "_optimized"
+    out_xlsx = config.OUTPUT_DIR / (Path(input_file).stem + suffix + ".xlsx")
+    export_xlsx(str(out_xlsx), mode)
+    print(f"[process] Auto-exported -> {out_xlsx}")
 
 
 def cmd_translate(args):
@@ -185,9 +315,14 @@ def cmd_glossary(args):
         return
 
     from ingest import load_glossary
-    glossary = load_glossary(gfile)
+    gpath = Path(gfile)
+    if not gpath.is_absolute():
+        gpath = config.BASE_DIR / gfile
+    if not gpath.exists():
+        print(f"[glossary] Glossary not found: {gpath}")
+        return
+    glossary = load_glossary(str(gpath))
 
-    import config
     db_path = str(config.WORKSPACE_DIR / "workspace.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -215,11 +350,12 @@ def cmd_export(args):
         return
 
     mode = get_project_meta("mode") or "new"
-    out_xlsx = config.OUTPUT_DIR / (Path(input_file).stem + config.OUTPUT_SUFFIX + ".xlsx")
-    export_xlsx(str(config.INPUT_DIR / input_file), str(out_xlsx), mode)
+    suffix = "_translated" if mode == "new" else "_optimized"
+    out_xlsx = config.OUTPUT_DIR / (Path(input_file).stem + suffix + ".xlsx")
+    export_xlsx(str(out_xlsx), mode)
 
     if args.csv:
-        out_csv = config.OUTPUT_DIR / (Path(input_file).stem + config.OUTPUT_SUFFIX + ".csv")
+        out_csv = config.OUTPUT_DIR / (Path(input_file).stem + suffix + ".csv")
         export_csv(str(out_csv))
 
 
@@ -232,6 +368,139 @@ def cmd_diff(args):
         return
     out_path = config.OUTPUT_DIR / (Path(input_file).stem + "_diff.xlsx")
     generate_diff(str(out_path))
+
+
+def cmd_status(args):
+    import sqlite3
+    db_path = str(config.WORKSPACE_DIR / "workspace.db")
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("SELECT status, COUNT(*) FROM rows GROUP BY status")
+    for r in c.fetchall():
+        print(f"  {r[0]}: {r[1]}")
+    c.execute("SELECT COUNT(*) FROM rows")
+    total = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM rows WHERE locked = 1")
+    locked = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM rows WHERE translation != '' AND translation IS NOT NULL")
+    translated = c.fetchone()[0]
+    conn.close()
+    print(f"  total: {total}, locked: {locked}, translated: {translated}")
+
+
+def _check_gate(required_files: list, required_db_checks: list = None) -> bool:
+    """Check prerequisite files and DB states. Print errors and return False if any missing."""
+    missing = []
+    for f in required_files:
+        if not Path(f).exists():
+            missing.append(f"file missing: {f}")
+    if required_db_checks:
+        db_path = str(config.WORKSPACE_DIR / "workspace.db")
+        if not Path(db_path).exists():
+            missing.append("DB missing: workspace.db")
+        else:
+            conn = sqlite3.connect(db_path)
+            for sql, desc in required_db_checks:
+                row = conn.execute(sql).fetchone()
+                if not row or row[0] == 0:
+                    missing.append(f"DB state: {desc}")
+            conn.close()
+    if missing:
+        print("[GATE] Prerequisites not met:")
+        for m in missing:
+            print(f"  - {m}")
+        return False
+    return True
+
+
+def cmd_scout(args):
+    if not _check_gate([args.input]):
+        return
+    from scout import run_scout
+    report = run_scout(args.input, args.glossary, args.knowledge_base)
+    if report:
+        print(f"[scout] Genre: {report.get('genre', '?')}, Tone: {report.get('tone', '?')}")
+
+
+def cmd_qa(args):
+    db_checks = [
+        ("SELECT COUNT(*) FROM rows WHERE status = 'done'", "no done rows"),
+    ]
+    if not _check_gate([], db_checks):
+        return
+    from qa import run_qa
+    report = run_qa(args.glossary)
+    if report:
+        print(f"[qa] Overall score: {report.get('overall_score', '?')}, Failed: {len(report.get('failed_rows', []))}")
+
+
+def cmd_doctor(args):
+    """Check environment, dependencies, API connectivity."""
+    import importlib.util, sys, os, subprocess
+    print("[doctor] Checking environment...")
+
+    # Python version
+    py_ok = sys.version_info >= (3, 10)
+    print(f"  Python {sys.version_info.major}.{sys.version_info.minor}: {'OK' if py_ok else 'FAIL (>=3.10 required)'}")
+
+    # Dependencies
+    deps = ["openai", "openpyxl", "numpy"]
+    for dep in deps:
+        spec = importlib.util.find_spec(dep)
+        print(f"  {dep}: {'OK' if spec else 'MISSING'}")
+
+    # API connectivity
+    print(f"  API base: {config.API_BASE_URL}")
+    key_set = bool(config.API_KEY and not config.API_KEY.startswith("your-"))
+    print(f"  API key: {'SET' if key_set else 'NOT SET'}")
+    if key_set:
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                config.API_BASE_URL.replace("/v1", "/v1/models"),
+                headers={"Authorization": f"Bearer {config.API_KEY}"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                print(f"  API ping: OK ({resp.status})")
+        except Exception as e:
+            print(f"  API ping: FAIL ({e})")
+
+    # Directories
+    for d in [config.INPUT_DIR, config.OUTPUT_DIR, config.WORKSPACE_DIR, config.LOG_DIR]:
+        print(f"  {d.name}: {'OK' if d.exists() else 'CREATED'}")
+        d.mkdir(parents=True, exist_ok=True)
+
+    print("[doctor] Done.")
+
+
+def cmd_run(args):
+    """One-shot: ingest -> process -> glossary -> export."""
+    print("[run] Starting full pipeline...")
+    cmd_ingest(args)
+    cmd_translate(args)
+    cmd_glossary(args)
+    cmd_export(args)
+    print("[run] Pipeline complete.")
+
+
+def cmd_project(args):
+    """Manage project profiles."""
+    import json
+    profiles_path = config.PROJECT_PROFILES
+
+    if args.action == "list":
+        if not profiles_path.exists():
+            print("[project] No projects found.")
+            return
+        data = json.loads(profiles_path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            data = [data]
+        for p in data:
+            print(f"  {p.get('project_id', '?')}: {p.get('file', '?')} ({p.get('mode', '?')})")
+
+    elif args.action == "switch":
+        # Copy selected project's workspace.db and meta
+        print(f"[project] Switch not yet implemented. Select by re-running ingest with --project-id.")
 
 
 def cmd_corpus(args):
@@ -277,6 +546,16 @@ def cmd_corpus(args):
         else:
             print(f"[corpus] Entry id={args.id} not found")
 
+    elif args.action == "export":
+        import json
+        conn = get_connection()
+        rows = conn.execute("SELECT * FROM corpus").fetchall()
+        conn.close()
+        out = [dict(r) for r in rows]
+        out_path = Path(args.file or config.OUTPUT_DIR / "corpus_export.json")
+        out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[corpus] Exported {len(out)} entries -> {out_path}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Game Localization Translator CLI")
@@ -298,6 +577,16 @@ def main():
     p.add_argument("--theme", help="e.g. wuxia, sci-fi, fantasy")
     p.add_argument("--lang-pair", help="e.g. EN-ZH, JA-ZH")
 
+    # scout
+    p = sub.add_parser("scout", help="Context analysis (multi-agent)")
+    p.add_argument("--input", required=True, help="Input file")
+    p.add_argument("--glossary", help="Glossary file")
+    p.add_argument("--knowledge-base", help="Knowledge base file")
+
+    # qa
+    p = sub.add_parser("qa", help="Quality assurance (multi-agent)")
+    p.add_argument("--glossary", help="Glossary file for terminology check")
+
     # retrieve
     p = sub.add_parser("retrieve", help="RAG corpus search")
     p.add_argument("--query", required=True)
@@ -306,10 +595,11 @@ def main():
     p.add_argument("--lang-pair", default="")
     p.add_argument("--top-k", type=int, default=3)
 
-    # translate
-    p = sub.add_parser("translate", help="Run translation/optimization")
+    # process
+    p = sub.add_parser("process", help="Run translation/optimization")
     # strong model parameter removed — unified model only
     p.add_argument("--style-anchor", default="", help="Style baseline text")
+    p.add_argument("--limit-batches", type=int, default=0, help="Limit number of batches (0 = no limit)")
 
     # glossary
     sub.add_parser("glossary", help="Enforce glossary replacements")
@@ -321,9 +611,38 @@ def main():
     # diff
     sub.add_parser("diff", help="Generate diff report")
 
+    # status
+    sub.add_parser("status", help="Show workspace row status")
+
+    # doctor
+    sub.add_parser("doctor", help="Check environment and dependencies")
+
+    # run
+    p = sub.add_parser("run", help="Full pipeline: ingest + process + glossary + export")
+    p.add_argument("--input", required=True, help="Input file")
+    p.add_argument("--glossary", help="Glossary file")
+    p.add_argument("--glossary-st-col", type=int, default=1)
+    p.add_argument("--glossary-tt-col", type=int, default=2)
+    p.add_argument("--knowledge-base", help="Knowledge base file")
+    p.add_argument("--source-col", type=int)
+    p.add_argument("--draft-col", type=int)
+    p.add_argument("--key-col", type=int)
+    p.add_argument("--locked-col", type=int)
+    p.add_argument("--project-id", help="Project identifier")
+    p.add_argument("--game-type", help="e.g. RPG, SLG, ACT")
+    p.add_argument("--theme", help="e.g. wuxia, sci-fi, fantasy")
+    p.add_argument("--lang-pair", help="e.g. EN-ZH, JA-ZH")
+    p.add_argument("--style-anchor", default="", help="Style baseline text")
+    p.add_argument("--csv", action="store_true", help="Also export CSV")
+
+    # project
+    p = sub.add_parser("project", help="Project management")
+    p.add_argument("action", choices=["list", "switch"])
+    p.add_argument("--id", help="Project ID to switch to")
+
     # corpus
     p = sub.add_parser("corpus", help="Corpus management")
-    p.add_argument("action", choices=["add", "list", "import", "delete"])
+    p.add_argument("action", choices=["add", "list", "import", "delete", "export"])
     p.add_argument("--source", help="For add")
     p.add_argument("--target", help="For add")
     p.add_argument("--project-id", default="")
@@ -331,7 +650,7 @@ def main():
     p.add_argument("--theme", default="")
     p.add_argument("--lang-pair", default="")
     p.add_argument("--quality", type=float, default=3.0)
-    p.add_argument("--file", help="For import: JSON file path")
+    p.add_argument("--file", help="For import/export: JSON file path")
     p.add_argument("--limit", type=int, default=20)
 
     args = parser.parse_args()
@@ -340,7 +659,7 @@ def main():
         cmd_ingest(args)
     elif args.command == "retrieve":
         cmd_retrieve(args)
-    elif args.command == "translate":
+    elif args.command == "process":
         cmd_translate(args)
     elif args.command == "glossary":
         cmd_glossary(args)
@@ -348,8 +667,20 @@ def main():
         cmd_export(args)
     elif args.command == "diff":
         cmd_diff(args)
+    elif args.command == "status":
+        cmd_status(args)
     elif args.command == "corpus":
         cmd_corpus(args)
+    elif args.command == "doctor":
+        cmd_doctor(args)
+    elif args.command == "run":
+        cmd_run(args)
+    elif args.command == "project":
+        cmd_project(args)
+    elif args.command == "scout":
+        cmd_scout(args)
+    elif args.command == "qa":
+        cmd_qa(args)
 
 
 if __name__ == "__main__":

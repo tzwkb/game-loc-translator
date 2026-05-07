@@ -1,0 +1,6 @@
+openai>=1.0
+openpyxl
+numpy
+sentence-transformers
+faiss-cpu
+python-dotenv

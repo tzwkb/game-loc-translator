@@ -6,6 +6,12 @@ Modify this file to switch API providers, models, and paths.
 import os
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent.parent / ".env")
+except ImportError:
+    pass
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -28,7 +34,7 @@ API_KEY      = os.environ.get("GAME_LOC_API_KEY", "")
 # Unified model for all batches
 MODEL = "gemini-3.1-pro-preview"
 
-MAX_TOKENS   = 4096
+MAX_TOKENS   = 8192
 TEMPERATURE  = 0.3
 REQUEST_TIMEOUT = 300
 MAX_RETRIES  = 5
@@ -38,11 +44,12 @@ MAX_WORKERS  = 100
 # ---------------------------------------------------------------------------
 # Batch Settings
 # ---------------------------------------------------------------------------
-BATCH_SIZE = 15  # rows per API call
+BATCH_SIZE = 1  # rows per API call (single-row mode to avoid token truncation)
 
 # ---------------------------------------------------------------------------
 # RAG / Corpus Settings
 # ---------------------------------------------------------------------------
+PROJECT_PROFILES  = BASE_DIR / "project_profiles.json"
 CORPUS_DB_PATH    = WORKSPACE_DIR / "corpus.db"
 CORPUS_FAISS_PATH = WORKSPACE_DIR / "corpus.faiss"
 EMBEDDING_MODEL   = "BAAI/bge-m3"  # 1024 dim, multilingual

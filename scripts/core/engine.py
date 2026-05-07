@@ -55,10 +55,16 @@ def init_api_log():
     _log_file = open(log_path, "a", encoding="utf-8", buffering=1)
     return str(log_path)
 
-def _log_api_call(messages: list, response: str | None, error: str | None = None):
+def _log_api_call(messages: list, response: str | None, error: str | None = None, attempt: int = 0):
     if _log_file is None:
         return
-    record = {"ts": datetime.datetime.now().isoformat(), "model": config.MODEL_DEFAULT, "messages": messages, "response": response}
+    record = {
+        "ts": datetime.datetime.now().isoformat(),
+        "model": config.MODEL,
+        "attempt": attempt,
+        "messages": messages,
+        "response": response,
+    }
     if error:
         record["error"] = error
     with _log_lock:
@@ -97,15 +103,14 @@ def _call_api_raw(messages: list, temperature: float = None, attempt: int = 0) -
             temperature=temp, timeout=config.REQUEST_TIMEOUT,
         )
         text = resp.choices[0].message.content.strip()
-        if attempt == 0:
-            _log_api_call(messages, text)
+        _log_api_call(messages, text, attempt=attempt)
         return text
     except Exception as exc:
         if attempt < config.MAX_RETRIES:
             wait = config.RETRY_DELAY * (2 ** attempt)
             time.sleep(wait)
             return _call_api_raw(messages, temp, attempt + 1)
-        _log_api_call(messages, None, error=str(exc))
+        _log_api_call(messages, None, error=str(exc), attempt=attempt)
         return None
 
 # ---------------------------------------------------------------------------
@@ -127,15 +132,14 @@ async def _async_call_api_raw(messages: list, temperature: float = None,
                 temperature=temp, timeout=config.REQUEST_TIMEOUT,
             )
             text = resp.choices[0].message.content.strip()
-            if attempt == 0:
-                _log_api_call(messages, text)
+            _log_api_call(messages, text, attempt=attempt)
             return text
         except Exception as exc:
             if attempt < config.MAX_RETRIES:
                 wait = config.RETRY_DELAY * (2 ** attempt)
                 await asyncio.sleep(wait)
                 return await _async_call_api_raw(messages, temp, semaphore, attempt + 1)
-            _log_api_call(messages, None, error=str(exc))
+            _log_api_call(messages, None, error=str(exc), attempt=attempt)
             return None
 
 # ---------------------------------------------------------------------------
@@ -176,13 +180,25 @@ def build_batch_messages(batch_items: list, mode: str, project_id: str = "",
             parts.append(f"DRAFT: {item['draft']}")
         row_blocks.append(f"[{label}]\n" + "\n".join(parts))
 
-    instructions = (
-        f"请处理以下 {len(batch_items)} 行文本。"
-        + ("输出每行的翻译译文。" if mode == "translate" else "对每行初译进行优化，输出优化后的译文。")
-        + "\n返回 JSON 对象，键为行号（字符串），值为译文。"
-        + '\n示例: {"1": "译文1", "2": "译文2"}'
-        + "\n仅输出合法 JSON，不要 markdown 代码块，不要解释。"
-    )
+    if mode == "optimize":
+        instructions = (
+            f"请处理以下 {len(batch_items)} 行文本。"
+            + "对每行初译进行优化，输出优化后的译文。"
+            + "\n返回 JSON 对象，键为行号（字符串），值为包含以下字段的对象："
+            + '\n  {"translation": "译文", "change_type": "类型", "change_reason": "原因"}'
+            + "\nchange_type 必须从以下选项中选择：terminology_fix, style_alignment, grammar_fix, polish, no_change"
+            + "\nchange_reason 用中文一句话简要说明修改原因，尽量简洁（15字以内）。"
+            + '\n示例: {"1": {"translation": "译文1", "change_type": "style_alignment", "change_reason": "调整语气更自然"}, "2": {...}}'
+            + "\n仅输出合法 JSON，不要 markdown 代码块，不要解释。"
+        )
+    else:
+        instructions = (
+            f"请处理以下 {len(batch_items)} 行文本。"
+            + "输出每行的翻译译文。"
+            + "\n返回 JSON 对象，键为行号（字符串），值为译文。"
+            + '\n示例: {"1": "译文1", "2": "译文2"}'
+            + "\n仅输出合法 JSON，不要 markdown 代码块，不要解释。"
+        )
 
     user_parts = list(preamble_parts)
     user_parts.append(instructions)
@@ -197,8 +213,11 @@ def build_batch_messages(batch_items: list, mode: str, project_id: str = "",
 
 
 def _parse_batch_response(raw: str, labels: list) -> dict:
+    """Parse API response. Supports both legacy string values and new dict values.
+    Returns {label: {"translation": str, "change_type": str, "change_reason": str}}.
+    """
     if not raw:
-        return {lbl: None for lbl in labels}
+        return {lbl: {"translation": None, "change_type": None, "change_reason": None} for lbl in labels}
     label_set = set(labels)
     result = {}
     # Try JSON first
@@ -208,8 +227,16 @@ def _parse_batch_response(raw: str, labels: list) -> dict:
             for k, v in data.items():
                 try:
                     lbl = int(k)
-                    if lbl in label_set and isinstance(v, str):
-                        result[lbl] = v
+                    if lbl in label_set:
+                        if isinstance(v, dict):
+                            result[lbl] = {
+                                "translation": v.get("translation") if isinstance(v.get("translation"), str) else None,
+                                "change_type": v.get("change_type") if isinstance(v.get("change_type"), str) else None,
+                                "change_reason": v.get("change_reason") if isinstance(v.get("change_reason"), str) else None,
+                            }
+                        elif isinstance(v, str):
+                            # Legacy format
+                            result[lbl] = {"translation": v, "change_type": None, "change_reason": None}
                 except (ValueError, TypeError):
                     pass
     except (json.JSONDecodeError, ValueError, AttributeError):
@@ -224,14 +251,14 @@ def _parse_batch_response(raw: str, labels: list) -> dict:
                 lbl = int(parts[i])
                 content = parts[i + 1].strip()
                 if lbl in label_set:
-                    result[lbl] = content
+                    result[lbl] = {"translation": content, "change_type": None, "change_reason": None}
             except (ValueError, IndexError):
                 pass
             i += 2
 
     for lbl in labels:
         if lbl not in result:
-            result[lbl] = None
+            result[lbl] = {"translation": None, "change_type": None, "change_reason": None}
     return result
 
 
@@ -239,14 +266,22 @@ async def translate_batch(batch_items: list, mode: str = "translate", project_id
                           style_anchor: str = "",
                           glossary_hints: list = None, kb_snippets: list = None,
                           rag_refs: list = None, semaphore: asyncio.Semaphore = None) -> dict:
-    """Async batch translate/optimize. Returns {label: text_or_None}."""
+    """Async batch translate/optimize. Returns {label: text_or_None}.
+    If response is truncated due to max_tokens, key '_truncated' is set True.
+    """
     labels = [item["label"] for item in batch_items]
     msgs = build_batch_messages(batch_items, mode, project_id, style_anchor,
                                 glossary_hints, kb_snippets, rag_refs)
     raw = await _async_call_api_raw(msgs, semaphore=semaphore)
     if raw is None:
         return {lbl: None for lbl in labels}
-    return _parse_batch_response(raw, labels)
+    # Detect systematic truncation (max_tokens insufficient)
+    stripped = strip_json_fences(raw).strip()
+    truncated = bool(stripped and not (stripped.endswith('}') or stripped.endswith(']')))
+    result = _parse_batch_response(raw, labels)
+    if truncated:
+        result["_truncated"] = True
+    return result
 
 # ---------------------------------------------------------------------------
 # TM / Embedding Index

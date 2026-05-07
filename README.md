@@ -57,19 +57,25 @@ style
 
 ### 2. 配置 API
 
-编辑 `scripts/core/config.py`：
-```python
-API_BASE_URL = "https://api.yourservice.com/v1"
-API_KEY      = "sk-xxx"
-MODEL        = "your-model-name"
+复制 `.env.example` 为 `.env` 并填入密钥：
+```bash
+cp .env.example .env
+# 编辑 .env
+GAME_LOC_API_BASE=https://api.yourservice.com/v1
+GAME_LOC_API_KEY=sk-xxx
 ```
+
+或直接编辑 `scripts/core/config.py`。
 
 ### 3. 执行流程
 
 ```bash
 cd scripts
 
-# Step 1: 加载项目
+# Step 1: 环境检查
+python cli.py doctor
+
+# Step 2: 加载项目
 python cli.py ingest \
   --input ../input/source.xlsx \
   --glossary ../input/glossary.txt \
@@ -79,14 +85,17 @@ python cli.py ingest \
   --theme fantasy \
   --lang-pair EN-ZH
 
-# Step 2: 翻译/优化
-python cli.py translate
+# Step 3: 翻译/优化（单行模式，自动前十行风格锚点）
+python cli.py process
 
-# Step 3: 术语强制替换
+# Step 4: 术语强制替换
 python cli.py glossary
 
-# Step 4: 导出结果
+# Step 5: 导出结果
 python cli.py export
+
+# 或一键串流（Step 2-5 合并）
+python cli.py run --input ../input/source.xlsx --glossary ../input/glossary.txt
 ```
 
 输出文件位于 `output/` 目录：
@@ -129,7 +138,7 @@ Agent 会自动检测列名（source / draft / key / locked），检测完成后
 | 命令 | 作用 | 常用参数 |
 |---|---|---|
 | `cli.py ingest` | 解析输入文件，加载术语表、知识库 | `--input` `--glossary` `--knowledge-base` `--project-id` `--game-type` `--theme` `--lang-pair` `--source-col` `--draft-col` `--key-col` `--locked-col` |
-| `cli.py translate` | 执行翻译/优化 | `--style-anchor` |
+| `cli.py process` | 执行翻译/优化 | `--style-anchor` |
 | `cli.py glossary` | 术语强制替换 | 无 |
 | `cli.py export` | 导出终稿 xlsx | `--csv` |
 | `cli.py diff` | 生成 Mode B 修改痕迹 | 无 |
@@ -154,18 +163,24 @@ game-loc-translator/
 │   ├── optimize_base.md       # Mode B 通用 prompt
 │   └── translate_project_*.md # 项目专属 prompt（可选）
 ├── scripts/
-│   ├── cli.py          # CLI 入口
+│   ├── cli.py              # CLI 入口
+│   ├── review_output.py    # 输出审查脚本
+│   ├── diff_review.py      # 差异终审脚本
 │   └── core/
-│       ├── config.py   # 配置中心
-│       ├── ingest.py   # 文件解析
-│       ├── engine.py   # API 引擎、prompt 组装
-│       ├── glossary.py # 术语强制替换
-│       ├── export.py   # 结果导出
-│       ├── diff.py     # Mode B 差异分析
-│       ├── corpus_store.py   # RAG 语料存储
-│       ├── corpus_search.py  # RAG 向量检索
-│       └── project_memory.py # 项目记忆持久化
-└── references/         # 风格指南等参考文档
+│       ├── config.py       # 配置中心
+│       ├── ingest.py       # 文件解析
+│       ├── engine.py       # API 引擎、prompt 组装
+│       ├── glossary.py     # 术语强制替换
+│       ├── export.py       # 结果导出
+│       ├── diff.py         # Mode B 差异分析
+│       ├── scout.py        # 上下文分析（可选增强）
+│       ├── qa.py           # 规则扫描（可选增强）
+│       ├── corpus_store.py       # RAG 语料存储
+│       ├── corpus_search.py      # RAG 向量检索
+│       └── project_memory.py     # 项目记忆持久化
+├── requirements.txt    # 依赖清单
+├── .env.example        # 环境变量模板
+└── .gitignore
 ```
 
 ---
@@ -178,7 +193,7 @@ game-loc-translator/
 |---|---|---|
 | `MODEL` | `gemini-3.1-pro-preview` | 统一模型 |
 | `TEMPERATURE` | `0.3` | 创造性/随机性 |
-| `BATCH_SIZE` | `15` | 每批 API 处理行数 |
+| `BATCH_SIZE` | `1` | 每批 API 处理行数（单行模式，避免截断） |
 | `MAX_WORKERS` | `100` | 并发上限 |
 | `MAX_RETRIES` | `5` | API 失败重试次数 |
 | `RAG_SIM_THRESHOLD` | `0.65` | RAG 相似度阈值 |
@@ -217,7 +232,7 @@ kimi-cli --skill game-loc-translator
 A：支持 `.xlsx` `.csv` `.txt` `.json` `.tsv` 五种格式，Agent 会自动检测并告知解析结果。
 
 **Q：处理到一半断网了怎么办？**  
-A：中间结果存在 `workspace/workspace.db` 中，重新执行 `cli.py translate` 会从断点继续。
+A：中间结果存在 `workspace/workspace.db` 中，重新执行 `cli.py process` 会从断点继续（pending/failed 行自动恢复）。
 
 **Q：不会用命令行怎么办？**  
 A：让 Agent 帮你跑。你只需提供文件路径和项目信息，Agent 自动调用脚本。

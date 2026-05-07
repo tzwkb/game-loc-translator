@@ -22,7 +22,7 @@
 | 支持 Excel/CSV/TXT/JSON/TSV | ✅ 已实现 | 多格式支持 |
 | 译文后自动扫描校准 | ✅ 已实现 | `cli.py glossary` |
 | 字段完整性校验 | ⚠️ Agent 层 | Agent 预览前 5 行预检 |
-| 按项目 ID 绑定 | ⚠️ 部分实现 | DB 记录 project_id，无多项目持久化切换界面 |
+| 按项目 ID 绑定 | ✅ 已实现 | DB 记录 project_id，`cli.py project list` 查看历史 |
 | 上传/替换/删除管理 | ⚠️ Agent 层 | Agent 通过对话操作文件 |
 
 ### 1.3 知识库
@@ -54,7 +54,7 @@
 |---|---|---|
 | 文档级全局术语扫描 | ✅ 已实现 | `glossary.py` 正则替换 |
 | 私有术语映射表 | ⚠️ Agent 层 | Agent 运行时扫描构建 |
-| 首段锚定 | ⚠️ Agent 层 | `style_anchor` 注入 + Agent 抽检确认 |
+| 首段锚定 | ✅ 已实现 | 前十行自动翻译作为风格锚点注入 prompt |
 | 风格首尾对齐 | ⚠️ Agent 层 | Agent 对比首末段 tone |
 | 句式一致性 | ⚠️ Agent 层 | Agent 抽检同类型句子 |
 
@@ -120,7 +120,7 @@
 
 14. **多级 RAG 召回**：Agent 可手动兜底，代码层加 fallback 更干净
 15. **项目持久化切换**：Agent 按 project_id 隔离 workspace 即可
-16. **requirements.txt / setup.py**：缺少依赖管理文件
+16. ~~requirements.txt / setup.py~~：✅ 已添加 `requirements.txt` + `.env.example`
 17. **性能基准测试**：未建立 1000+句基准
 
 ---
@@ -133,7 +133,7 @@
 | Day 2 | RAG 向量检索 + 语料存储 | ✅ 完成 |
 | Day 3 | 术语约束 + 知识库加载 | ✅ 完成 |
 | Day 4 | 双模式翻译链路 + Prompt | ✅ 完成 |
-| Day 5 | 一致性引擎 + 差异比对 | ⚠️ 基础实现，Agent 终审补强 |
+| Day 5 | 一致性引擎 + 差异比对 | ✅ 已实现，含 diff_review 脚本 |
 | Day 6 | 后台管理 + 参数配置 | ❌ GUI 放弃，Agent 层替代 |
 | Day 7 | 集成测试 + 文档 | ⚠️ CLI 测试完成，性能基准未建立 |
 

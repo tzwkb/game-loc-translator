@@ -24,6 +24,9 @@ def init_workspace() -> sqlite3.Connection:
             source TEXT NOT NULL,
             draft TEXT DEFAULT '',
             translation TEXT DEFAULT '',
+            change_type TEXT DEFAULT '',
+            change_reason TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
             key TEXT DEFAULT '',
             locked INTEGER DEFAULT 0,
             status TEXT DEFAULT 'pending'
@@ -257,6 +260,12 @@ def load_knowledge_base(filepath: str) -> list:
 
 def save_project_meta(key: str, value: str):
     conn = sqlite3.connect(WORKSPACE_DB)
+    # Store file paths as absolute to avoid CWD issues
+    if key.endswith("_file") and value:
+        p = Path(value)
+        if not p.is_absolute():
+            p = config.BASE_DIR / value
+        value = str(p.resolve())
     conn.execute("INSERT OR REPLACE INTO project (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
     conn.close()
@@ -272,14 +281,19 @@ def get_project_meta(key: str) -> str | None:
 def get_pending_rows() -> list:
     conn = sqlite3.connect(WORKSPACE_DB)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute("SELECT * FROM rows WHERE locked = 0 ORDER BY id").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM rows WHERE locked = 0 AND status IN ('pending', 'failed') ORDER BY id"
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def update_row_result(row_id: int, translation: str, status: str = "done"):
+def update_row_result(row_id: int, translation: str, status: str = "done",
+                        change_type: str = "", change_reason: str = ""):
     conn = sqlite3.connect(WORKSPACE_DB)
-    conn.execute("UPDATE rows SET translation = ?, status = ? WHERE id = ?",
-                 (translation, status, row_id))
+    conn.execute(
+        "UPDATE rows SET translation = ?, status = ?, change_type = ?, change_reason = ? WHERE id = ?",
+        (translation, status, change_type, change_reason, row_id)
+    )
     conn.commit()
     conn.close()

@@ -7,6 +7,7 @@ Based on: bge-m3 embedding + IndexFlatIP.
 import os
 import hashlib
 import sqlite3
+from pathlib import Path
 import numpy as np
 import faiss
 from dataclasses import dataclass
@@ -64,13 +65,78 @@ def init_db() -> None:
 # ---------------------------------------------------------------------------
 _model = None
 
+
+def _model_is_cached(model_name: str) -> bool:
+    """Check if sentence-transformers model is already cached locally."""
+    safe_name = model_name.replace("/", "_")
+    candidates = []
+
+    st_home = os.environ.get("SENTENCE_TRANSFORMERS_HOME")
+    if st_home:
+        candidates.append(Path(st_home) / safe_name)
+
+    torch_cache = os.path.expanduser("~/.cache/torch/sentence_transformers")
+    candidates.append(Path(torch_cache) / safe_name)
+
+    hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+    candidates.append(Path(hf_home) / "hub" / f"models--{model_name.replace('/', '--')}")
+
+    for p in candidates:
+        if p.exists():
+            return True
+    return False
+
+
 def get_embedding_model():
     global _model
-    if _model is None:
-        from sentence_transformers import SentenceTransformer
-        print(f"[corpus_store] Loading {config.EMBEDDING_MODEL} ...")
-        _model = SentenceTransformer(config.EMBEDDING_MODEL)
+    if _model is not None:
+        return _model
+
+    from sentence_transformers import SentenceTransformer
+    import sys
+
+    if not _model_is_cached(config.EMBEDDING_MODEL):
+        print(f"[corpus_store] Embedding model '{config.EMBEDDING_MODEL}' not found locally.")
+        print(f"  This model (~500MB) is required for RAG corpus operations.")
+
+        if sys.stdin.isatty():
+            print(f"\n  Download from HuggingFace now?")
+            try:
+                resp = input("  [y/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                resp = "n"
+            if resp not in ("y", "yes", "是", "ok"):
+                print("  Aborted.")
+                _print_install_hint()
+                raise RuntimeError(f"Embedding model {config.EMBEDDING_MODEL} not available.")
+        else:
+            _print_install_hint()
+            raise RuntimeError(f"Embedding model {config.EMBEDDING_MODEL} not available.")
+
+        # User agreed to download — temporarily clear offline flags
+        offline_keys = ["HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"]
+        old_values = {}
+        for key in offline_keys:
+            old_values[key] = os.environ.pop(key, None)
+
+        try:
+            print(f"[corpus_store] Loading {config.EMBEDDING_MODEL} ...")
+            _model = SentenceTransformer(config.EMBEDDING_MODEL)
+        finally:
+            for key, val in old_values.items():
+                if val is not None:
+                    os.environ[key] = val
+        return _model
+
+    print(f"[corpus_store] Loading {config.EMBEDDING_MODEL} ...")
+    _model = SentenceTransformer(config.EMBEDDING_MODEL)
     return _model
+
+
+def _print_install_hint():
+    print("  To install manually, run:")
+    print(f'  python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer(\'{config.EMBEDDING_MODEL}\')"')
+    print("  Or set HF_HOME to a local mirror path if you have one.")
 
 
 def embed(texts: list[str]) -> np.ndarray:
