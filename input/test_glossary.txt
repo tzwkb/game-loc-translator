@@ -1,0 +1,6 @@
+﻿Dragon = 巨龙
+Warrior = 战士
+Arcane Crystal = 奥术水晶
+HP = 生命值
+healing potion = 治疗药水
+Dragon Fire = 龙焰
