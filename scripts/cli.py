@@ -15,6 +15,7 @@ Commands:
 
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -82,13 +83,18 @@ def cmd_retrieve(args):
             "target": h.target,
             "quality": h.quality_score,
         })
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+    output = json.dumps(out, ensure_ascii=False, indent=2)
+    if args.output:
+        Path(args.output).write_text(output, encoding="utf-8")
+        print(f"[retrieve] {len(out)} hits -> {args.output}")
+    else:
+        print(output)
 
 
 async def cmd_translate_async(args):
     import asyncio
     import sqlite3
-    from ingest import get_pending_rows, get_project_meta
+    from ingest import get_pending_rows, get_project_meta, load_knowledge_base
     from engine import translate_batch, find_matching_terms
     from corpus_search import search_corpus
     from export import export_xlsx
@@ -157,6 +163,18 @@ async def cmd_translate_async(args):
                 "key": row.get("key", ""),
             }
             glossary_hints = find_matching_terms(row["source"], glossary)
+            kb_snippets = []
+            kb_file = get_project_meta("kb_file")
+            if kb_file:
+                kb_path = Path(kb_file)
+                if not kb_path.is_absolute():
+                    kb_path = config.BASE_DIR / kb_file
+                if kb_path.exists():
+                    for entry in load_knowledge_base(str(kb_path)):
+                        cat = entry.get("category", "")
+                        text = entry.get("text", "")
+                        if cat and text:
+                            kb_snippets.append((cat, text))
             rag_refs = []
             if not skip_rag:
                 hits = search_corpus(row["source"], game_type, theme, lang_pair, top_k=3)
@@ -173,6 +191,7 @@ async def cmd_translate_async(args):
                     project_id=project_id,
                     style_anchor=style_anchor_to_use,
                     glossary_hints=glossary_hints,
+                    kb_snippets=kb_snippets,
                     rag_refs=rag_refs,
                     semaphore=None,
                 )
@@ -330,14 +349,125 @@ def cmd_glossary(args):
     conn.close()
 
     translations = {r["id"]: r["translation"] for r in rows}
-    enforced = enforce_glossary(translations, glossary)
+    enforced, log = enforce_glossary(translations, glossary)
 
     conn = sqlite3.connect(db_path)
     for row_id, text in enforced.items():
-        conn.execute("UPDATE rows SET translation = ? WHERE id = ?", (text, row_id))
+        if row_id in log:
+            # Build change_reason from log
+            terms = [f"{item['term']}→{item['replacement']}" for item in log[row_id]]
+            reason = "术语修正：" + ", ".join(terms)
+            conn.execute("UPDATE rows SET translation = ?, change_type = 'terminology_fix', change_reason = ? WHERE id = ?", (text, reason, row_id))
+        else:
+            conn.execute("UPDATE rows SET translation = ? WHERE id = ?", (text, row_id))
     conn.commit()
     conn.close()
-    print(f"[glossary] Enforced on {len(enforced)} rows")
+    print(f"[glossary] Enforced on {len(enforced)} rows, {len(log)} rows with replacements")
+
+
+def cmd_changed_terms(args):
+    """Export changed terms report (Mode B)."""
+    from ingest import get_project_meta
+    from glossary import detect_changed_terms, export_changed_terms
+    import sqlite3
+
+    gfile = get_project_meta("glossary_file")
+    if not gfile:
+        print("[changed-terms] No glossary loaded.")
+        return
+
+    from ingest import load_glossary
+    gpath = Path(gfile)
+    if not gpath.is_absolute():
+        gpath = config.BASE_DIR / gfile
+    if not gpath.exists():
+        print(f"[changed-terms] Glossary not found: {gpath}")
+        return
+    glossary = load_glossary(str(gpath))
+
+    db_path = str(config.WORKSPACE_DIR / "workspace.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT row_num, source, draft, translation FROM rows WHERE status = 'done'").fetchall()
+    conn.close()
+
+    # Convert to list of dicts
+    row_data = []
+    for r in rows:
+        row_data.append({
+            "row_num": r["row_num"],
+            "source": r["source"],
+            "draft": r["draft"],
+            "optimized": r["translation"]
+        })
+
+    changed_terms = detect_changed_terms(row_data, glossary)
+
+    if not changed_terms:
+        print("[changed-terms] No terminology changes detected.")
+        return
+
+    # Export to xlsx
+    input_file = get_project_meta("input_file")
+    if input_file:
+        out_path = config.OUTPUT_DIR / (Path(input_file).stem + "_changed_terms.xlsx")
+    else:
+        out_path = config.OUTPUT_DIR / "changed_terms.xlsx"
+
+    export_changed_terms(changed_terms, str(out_path))
+    print(f"[changed-terms] Exported {len(changed_terms)} changed terms to {out_path}")
+
+
+def cmd_term_hits(args):
+    """Export term hits report (Mode A)."""
+    from ingest import get_project_meta
+    from glossary import detect_term_hits, export_term_hits
+    import sqlite3
+
+    gfile = get_project_meta("glossary_file")
+    if not gfile:
+        print("[term-hits] No glossary loaded.")
+        return
+
+    from ingest import load_glossary
+    gpath = Path(gfile)
+    if not gpath.is_absolute():
+        gpath = config.BASE_DIR / gfile
+    if not gpath.exists():
+        print(f"[term-hits] Glossary not found: {gpath}")
+        return
+    glossary = load_glossary(str(gpath))
+
+    db_path = str(config.WORKSPACE_DIR / "workspace.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT row_num, source, translation FROM rows WHERE status = 'done'").fetchall()
+    conn.close()
+
+    # Convert to list of dicts
+    row_data = []
+    for r in rows:
+        row_data.append({
+            "row_num": r["row_num"],
+            "source": r["source"],
+            "translation": r["translation"]
+        })
+
+    term_hits = detect_term_hits(row_data, glossary)
+
+    if not term_hits:
+        print("[term-hits] No term hits detected.")
+        return
+
+    # Export to xlsx
+    input_file = get_project_meta("input_file")
+    if input_file:
+        out_path = config.OUTPUT_DIR / (Path(input_file).stem + "_term_hits.xlsx")
+    else:
+        out_path = config.OUTPUT_DIR / "term_hits.xlsx"
+
+    export_term_hits(term_hits, str(out_path))
+    print(f"[term-hits] Exported {len(term_hits)} term hits to {out_path}")
 
 
 def cmd_export(args):
@@ -479,6 +609,15 @@ def cmd_run(args):
     cmd_ingest(args)
     cmd_translate(args)
     cmd_glossary(args)
+
+    # Mode-specific reports
+    from ingest import get_project_meta
+    mode = get_project_meta("mode") or "new"
+    if mode == "new":
+        cmd_term_hits(args)
+    else:
+        cmd_changed_terms(args)
+
     cmd_export(args)
     print("[run] Pipeline complete.")
 
@@ -594,6 +733,7 @@ def main():
     p.add_argument("--theme", default="")
     p.add_argument("--lang-pair", default="")
     p.add_argument("--top-k", type=int, default=3)
+    p.add_argument("--output", help="Write JSON results to file")
 
     # process
     p = sub.add_parser("process", help="Run translation/optimization")
@@ -603,6 +743,12 @@ def main():
 
     # glossary
     sub.add_parser("glossary", help="Enforce glossary replacements")
+
+    # changed-terms
+    sub.add_parser("changed-terms", help="Export changed terms report")
+
+    # term-hits
+    sub.add_parser("term-hits", help="Export term hits report")
 
     # export
     p = sub.add_parser("export", help="Export final results")
@@ -663,6 +809,10 @@ def main():
         cmd_translate(args)
     elif args.command == "glossary":
         cmd_glossary(args)
+    elif args.command == "changed-terms":
+        cmd_changed_terms(args)
+    elif args.command == "term-hits":
+        cmd_term_hits(args)
     elif args.command == "export":
         cmd_export(args)
     elif args.command == "diff":

@@ -18,44 +18,124 @@
 
 ---
 
-## 快速开始
+## 文件准备指南
 
-### 1. 准备文件
+本模块无 Web 上传界面。用户只需将文件放到 `input/` 目录（或任意位置），然后向 Agent 提供路径即可。
 
-**输入文件（Excel/CSV）：**
+### 1. 输入文件（待翻译）
+
+放到 `input/` 目录。Agent 自动检测列名。
+
+**Excel 格式（推荐）：**
 
 Mode A — 纯原文：
 ```
 | id | source                     | key            | locked |
 |----|----------------------------|----------------|--------|
-| 1  | The Dragon attacks.        | dlg_boss_001   | FALSE  |
+| 1  | The Dragon attacks.        | dlg_boss_001   | 0      |
 ```
 
 Mode B — 原文+初译：
 ```
 | id | source                     | draft            | key            | locked |
 |----|----------------------------|------------------|----------------|--------|
-| 1  | The Dragon attacks.        | 龙发起了攻击。   | dlg_boss_001   | FALSE  |
+| 1  | The Dragon attacks.        | 龙发起了攻击。   | dlg_boss_001   | 0      |
 ```
 
-**术语表（Excel/CSV/TXT/JSON/TSV）：**
+**自动识别的列名：**
+
+| 列 | 识别关键词 |
+|---|---|
+| source | `source` / `原文` / `源语` / `text` |
+| draft | `draft` / `初译` / `mt` |
+| key | `key` / `id` / `context` |
+| locked | `locked` / `锁定` / `skip` |
+| placeholder | `placeholder` / `变量` / `param` / `format_spec` |
+| max_length | `max_length` / `长度限制` / `char_limit` |
+| gender | `gender` / `性` / `语法性别` |
+
+> `locked=1/TRUE/是` 的行会直接原样输出，不经过 API。
+
+### 2. 术语表
+
+放到 `input/` 目录。支持多种格式。
+
+**TXT 格式（最简单）：**
 ```
 Dragon = 巨龙
 Warrior = 战士
+Arcane Crystal = 奥术水晶
+HP = 生命值
+```
+分隔符支持 `=` `\t` `|` `: ` 自动识别。
+
+**Excel/CSV 格式：**
+```
+| source_term | target_term |
+|-------------|-------------|
+| Dragon      | 巨龙        |
+| Warrior     | 战士        |
 ```
 
-**知识库（Excel/CSV/TXT/JSON/Markdown）：**
+**JSON 格式：**
+```json
+[{"source":"Dragon","target":"巨龙"}]
+```
+
+### 3. 知识库
+
+放到 `input/` 目录。按 category 组织约束。
+
+**TXT 格式（推荐）：**
 ```
 world
 这片大陆被巨龙统治，人类在边缘生存。
 ---
 style
 技能描述使用四字短语，对话口语化。
+---
+禁忌
+不得出现"能量""升级"等过于现代化的词汇。
+---
+角色
+主角李青云 — 昆仑派弟子，性格沉稳，自称"在下"
+```
+用 `---` 分隔区块，首行为 category，后续为 text。
+
+**Excel/CSV 格式：**
+```
+| category | note | text                                      |
+|----------|------|-------------------------------------------|
+| 风格     |      | 技能描述使用四字短语，对话口语化。        |
+| 禁忌     |      | 不得出现"能量""升级"。                   |
+| 角色     | 主角 | 李青云 — 昆仑派弟子，性格沉稳。           |
 ```
 
-> `locked=TRUE` 的行会直接原样输出，不经过 API。
+**支持的 category（建议）：**
 
-### 2. 配置 API
+| category | 作用 | 在流程中的使用位置 |
+|---|---|---|
+| `禁忌` | 禁用词清单 | process prompt 硬约束 + qa 清单对照 |
+| `风格` | 翻译风格要求 | process prompt 风格约束 |
+| `设定` | 世界观/背景设定 | process prompt 语境约束 |
+| `角色` | 角色名、口癖、称谓 | process prompt 角色约束 |
+
+### 怎么交给 Agent
+
+不需要手动执行命令。直接告诉 Agent：
+
+```
+翻译 input/game_text.xlsx，术语表用 input/glossary.txt，知识库用 input/kb.txt。
+项目类型 RPG，题材 fantasy，语言对 EN-ZH。
+```
+
+Agent 自动调度 ingest-agent → process-agent → qa-agent 完成全流程。
+
+---
+
+## 快速开始
+
+### 1. 配置 API
 
 复制 `.env.example` 为 `.env` 并填入密钥：
 ```bash
@@ -185,6 +265,66 @@ game-loc-translator/
 
 ---
 
+## 存储与数据流
+
+### 五类存储
+
+| # | 存储名 | 类型 | 来源 | 路径 | 说明 |
+|---|---|---|---|---|---|
+| 1 | **术语表** | 用户文件 | 用户上传 | `input/glossary.*` | 项目专属术语映射，process 阶段加载 |
+| 2 | **知识库** | 用户文件 | 用户上传 | `input/kb.*` | 风格/设定/禁忌/角色约束，ingest 解析后 process 加载 |
+| 3 | **输入数据** | 用户文件 | 用户上传 | `input/*.xlsx` 等 | 待翻译源文本，ingest 解析后入 workspace.db |
+| 4 | **workspace.db** | SQLite | 运行时生成 | `workspace/workspace.db` | 行数据 + 项目元数据（kb_file、术语命中数等） |
+| 5 | **corpus.db + corpus.faiss** | SQLite + FAISS | 运行时生成/语料沉淀 | `workspace/corpus.db` / `workspace/corpus.faiss` | RAG 语料存储（文本+向量），`corpus` 命令管理 |
+
+其中 1-3 为**用户提供的项目库**，4-5 为**系统运行时库**。
+
+### 数据流
+
+```
+用户上传
+  ├── 输入文件 ──→ ingest-agent ──→ workspace.db (rows 表)
+  ├── 术语表 ─────→ ingest-agent ──→ workspace meta (glossary_file)
+  └── 知识库 ─────→ ingest-agent ──→ workspace meta (kb_file)
+                                          │
+                                          ↓
+                                    process-agent
+                                          │
+                                          ├─→ 术语表 → glossary_hints → API prompt
+                                          ├─→ 知识库 → kb_snippets → API prompt
+                                          ├─→ RAG → rag_refs → API prompt (corpus>=10)
+                                          └─→ 翻译结果 → workspace.db
+                                                            │
+                                                            ↓
+                                                      glossary 替换
+                                                            │
+                                                            ↓
+                                                      qa-agent
+                                                            │
+                                                            ├─→ 审查通过 → export → output/
+                                                            └─→ 语料沉淀 → corpus.db/.faiss
+```
+
+### workspace.db 结构
+
+| 表名 | 内容 |
+|---|---|
+| `rows` | 待处理/已处理的行数据（id, source, draft, translation, status, notes, locked, key, change_type, change_reason） |
+| `project` | 项目元数据（project_id, game_type, theme, lang_pair, kb_file, kb_count, glossary_file, glossary_count, mode） |
+
+### corpus.db 结构
+
+| 表名 | 内容 |
+|---|---|
+| `corpus` | 历史语料（id, project_id, game_type, theme, lang_pair, source, target, quality_score, created_at） |
+| `query_cache` | 嵌入向量缓存（query_key, vector），避免重复编码 |
+
+`corpus.faiss` 为向量索引文件，与 `corpus.db` 通过 `id` 关联。
+
+**当前 corpus 状态**：仅含 1 条测试数据（`cli.py corpus add` 插入），RAG 未生效（`< 10` 条时自动跳过检索）。真实项目沉淀语料后自动启用。
+
+---
+
 ## 配置说明
 
 `scripts/core/config.py`：
@@ -210,19 +350,99 @@ game-loc-translator/
 
 ---
 
-## 作为 Agent 嵌入使用
+## 多 Agent 架构
 
-本模块设计为 **可被 AI Agent 调用的内核**，不绑定任何前端。Agent（如 Claude Code / Kimi CLI）的角色是：
+本模块采用 **主 Agent 调度 + 子 Agent 执行** 的多 Agent 架构。主 Agent 是纯粹的调度者，禁止直接操作脚本、文件或 API。所有执行动作委派给专用子 Agent。
 
-1. **扫描确认**：读取文件 → 分析列名 → 汇报参数 → 等用户确认
-2. **调度执行**：调用 `cli.py` 各命令，监控进度
-3. **质检仲裁**：抽检结果，分析失败原因，重试或标记人工
-4. **运营沉淀**：筛选优质句对入库，更新知识库
+### Agent 分工
 
-Agent 的行为规范定义在 `SKILL.md` 中。加载方式：
+| Agent | 职责 | 独占权限 | 参考手册 |
+|---|---|---|---|
+| **主 Agent** | 决策、调度、审查回传、终决 | 禁止直接执行任何脚本 | `SKILL.md` |
+| **ingest-agent** | 数据解析、列检测、术语预检、环境检查、`ingest`/`scout`、语料运营 | 数据摄入与归档 | `SKILL.md` / `SUB_ingest.md` |
+| **process-agent** | API 翻译/优化、`glossary` 术语替换、并发管理、截断重试 | API 调用与术语强制替换 | `SKILL.md` / `SUB_process.md` |
+| **qa-agent** | 质检抽检、差异终审（Mode B）、输出审查、`export` 导出、格式修复、RAG 一致性对比 | 质检审查与交付导出 | `SKILL.md` / `SUB_qa.md` |
+
+### 调度流程
+
+```
+主 Agent
+  │
+  ├─→ ingest-agent
+  │       ├─→ 启动扫描 / 列检测 / 术语预检
+  │       ├─→ cli.py ingest
+  │       │   └─→ knowledge_profile.json（知识库结构化输出）
+  │       ├─→ cli.py scout（可选）
+  │       └─→ 回传参数、异常、知识库统计
+  │
+  ├─→ process-agent ←── knowledge_profile.json
+  │       ├─→ 知识库注入 API prompt（风格/设定/禁忌）
+  │       ├─→ RAG 检索 → few-shot（corpus>=10 时自动启用）
+  │       ├─→ cli.py process / run
+  │       ├─→ cli.py glossary（术语强制替换）
+  │       └─→ 回传翻译结果、RAG 命中统计
+  │
+  ├─→ qa-agent ←── knowledge_profile.json
+  │       ├─→ 知识库清单对照审查
+  │       ├─→ RAG 一致性对比（cli.py retrieve）
+  │       ├─→ 质检抽检 / 差异终审（Mode B）
+  │       ├─→ 输出审查（结构化 9 项）
+  │       ├─→ cli.py export
+  │       └─→ 回传质检结论、导出文件
+  │
+  └─→ 终决：交付 / 报 PM / 回流
+```
+
+### 上下文传递规范
+
+主 Agent 向子 Agent 下发任务时必须携带：
+1. 项目标识（workspace 路径、项目名）
+2. 当前阶段目标
+3. 上游子 Agent 的输出摘要或关键结论
+4. 已知风险点（术语冲突、格式约束、max_length 超限历史等）
+5. `knowledge_profile_path`：知识库结构化摘要路径
+6. `rag_enabled`：当前项目 corpus 是否 >= 10
+7. 回传要求：结构化摘要 + 原始输出文件路径 + 异常标记
+
+子 Agent 回传时必须提供：
+1. 执行摘要（成功/失败/异常）
+2. 关键数据（行数、术语命中数、异常行号、评分）
+3. 输出文件路径
+4. 下一步建议 / 阻塞项
+
+### 核心机制
+
+**ingest-agent**
+- 解析输入后输出 `workspace/knowledge_profile.json`，按 category 分组（禁忌/风格/设定/角色）
+- 支持可选 `cli.py scout` 上下文分析
+- 语料运营：`cli.py corpus add/export/import`
+
+**process-agent**
+- 读取 `knowledge_profile.json`，将 `风格`/`设定`/`角色`/`禁忌` 注入 API system prompt
+- 自动 RAG 检索：每行 source 执行 `search_corpus()`（corpus >= 10 时启用），similarity >= 0.65 的命中注入 few-shot
+- 术语强制替换 `cli.py glossary` 作为 process 流程的收尾
+
+**qa-agent**
+- 自主审查：直接读取数据，用自己的推理能力完成全部审查项
+- 知识库清单对照：逐项核对知识库约束执行情况
+- RAG 一致性对比：对抽检行执行 `cli.py retrieve`，对比当前输出与历史 approved translation
+- 审查通过后执行 `cli.py export`，形成"审查 → 决策 → 交付"闭环
+
+### Skill 文件结构
+
+```
+SKILL.md              # 主 Agent 调度手册（禁令、流程图、决策规则）
+SUB_ingest.md         # ingest-agent 执行手册
+SUB_process.md        # process-agent 执行手册
+SUB_qa.md             # qa-agent 执行手册
+```
+
+加载方式：
 ```bash
 kimi-cli --skill game-loc-translator
 ```
+
+主 Agent 调度时读取对应子 Agent 手册，将内容作为上下文注入子 Agent 的 system prompt。
 
 ---
 
