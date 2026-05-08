@@ -54,6 +54,7 @@ CORPUS_DB_PATH    = WORKSPACE_DIR / "corpus.db"
 CORPUS_FAISS_PATH = WORKSPACE_DIR / "corpus.faiss"
 EMBEDDING_MODEL   = "BAAI/bge-m3"  # 1024 dim, multilingual
 VECTOR_DIM        = 1024
+RAG_ENABLED       = True
 RAG_TOP_K         = 3
 RAG_SIM_THRESHOLD = 0.65
 

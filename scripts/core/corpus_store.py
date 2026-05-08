@@ -64,6 +64,48 @@ def init_db() -> None:
 # Embedding model (lazy singleton)
 # ---------------------------------------------------------------------------
 _model = None
+_rag_disabled = False
+
+
+def _is_sentence_transformers_model(path: Path) -> bool:
+    """Check if a cache dir contains a sentence-transformers model."""
+    if (path / "modules.json").exists():
+        return True
+    for sub in path.rglob("modules.json"):
+        return True
+    return False
+
+
+def _scan_cached_models() -> list[str]:
+    """Scan local caches for all sentence-transformers models."""
+    found = set()
+
+    torch_cache = Path(os.path.expanduser("~/.cache/torch/sentence_transformers"))
+    if torch_cache.exists():
+        for p in torch_cache.iterdir():
+            if p.is_dir() and not p.name.startswith(".") and _is_sentence_transformers_model(p):
+                found.add(p.name.replace("_", "/"))
+
+    hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+    hf_hub = Path(hf_home) / "hub"
+    if hf_hub.exists():
+        for p in hf_hub.iterdir():
+            if p.is_dir() and p.name.startswith("models--"):
+                if not _is_sentence_transformers_model(p):
+                    continue
+                parts = p.name.replace("models--", "").split("--")
+                if len(parts) >= 2:
+                    found.add("/".join(parts))
+
+    st_home = os.environ.get("SENTENCE_TRANSFORMERS_HOME")
+    if st_home:
+        st_path = Path(st_home)
+        if st_path.exists():
+            for p in st_path.iterdir():
+                if p.is_dir() and not p.name.startswith(".") and _is_sentence_transformers_model(p):
+                    found.add(p.name.replace("_", "/"))
+
+    return sorted(found)
 
 
 def _model_is_cached(model_name: str) -> bool:
@@ -88,17 +130,41 @@ def _model_is_cached(model_name: str) -> bool:
 
 
 def get_embedding_model():
-    global _model
+    global _model, _rag_disabled
+    if _rag_disabled or not config.RAG_ENABLED:
+        return None
     if _model is not None:
         return _model
 
     from sentence_transformers import SentenceTransformer
     import sys
 
-    if not _model_is_cached(config.EMBEDDING_MODEL):
-        print(f"[corpus_store] Embedding model '{config.EMBEDDING_MODEL}' not found locally.")
-        print(f"  This model (~500MB) is required for RAG corpus operations.")
+    cached_models = _scan_cached_models()
 
+    # Multiple models — ask user to pick
+    if len(cached_models) > 1:
+        print(f"[corpus_store] Found {len(cached_models)} cached embedding models:")
+        for i, name in enumerate(cached_models, 1):
+            marker = " (current)" if name == config.EMBEDDING_MODEL else ""
+            print(f"  {i}. {name}{marker}")
+        if sys.stdin.isatty():
+            try:
+                choice = input(
+                    f"  Select model (1-{len(cached_models)}, or Enter for default {config.EMBEDDING_MODEL}): "
+                ).strip()
+                if choice:
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(cached_models):
+                        config.EMBEDDING_MODEL = cached_models[idx]
+            except (ValueError, EOFError, KeyboardInterrupt):
+                pass
+        else:
+            print(f"  Using default: {config.EMBEDDING_MODEL}")
+
+    # No models — ask to download or disable RAG
+    elif len(cached_models) == 0:
+        print(f"[corpus_store] No embedding model found locally.")
+        print(f"  Required: {config.EMBEDDING_MODEL} (~500MB)")
         if sys.stdin.isatty():
             print(f"\n  Download from HuggingFace now?")
             try:
@@ -106,21 +172,29 @@ def get_embedding_model():
             except (EOFError, KeyboardInterrupt):
                 resp = "n"
             if resp not in ("y", "yes", "是", "ok"):
-                print("  Aborted.")
-                _print_install_hint()
-                raise RuntimeError(f"Embedding model {config.EMBEDDING_MODEL} not available.")
+                print("  RAG corpus disabled for this session.")
+                _rag_disabled = True
+                config.RAG_ENABLED = False
+                return None
         else:
-            _print_install_hint()
-            raise RuntimeError(f"Embedding model {config.EMBEDDING_MODEL} not available.")
+            print("  RAG corpus disabled (non-interactive session, model not cached).")
+            _rag_disabled = True
+            config.RAG_ENABLED = False
+            return None
 
-        # User agreed to download — temporarily clear offline flags
+    # Single model different from default — use it
+    elif len(cached_models) == 1 and cached_models[0] != config.EMBEDDING_MODEL:
+        print(f"[corpus_store] Using cached model: {cached_models[0]}")
+        config.EMBEDDING_MODEL = cached_models[0]
+
+    # Load / download
+    if not _model_is_cached(config.EMBEDDING_MODEL):
         offline_keys = ["HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"]
         old_values = {}
         for key in offline_keys:
             old_values[key] = os.environ.pop(key, None)
-
         try:
-            print(f"[corpus_store] Loading {config.EMBEDDING_MODEL} ...")
+            print(f"[corpus_store] Downloading {config.EMBEDDING_MODEL} ...")
             _model = SentenceTransformer(config.EMBEDDING_MODEL)
         finally:
             for key, val in old_values.items():
@@ -141,11 +215,16 @@ def _print_install_hint():
 
 def embed(texts: list[str]) -> np.ndarray:
     model = get_embedding_model()
+    if model is None:
+        return np.zeros((len(texts), config.VECTOR_DIM), dtype=np.float32)
     vectors = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     return vectors.astype(np.float32)
 
 
 def embed_with_cache(texts: list[str]) -> np.ndarray:
+    model = get_embedding_model()
+    if model is None:
+        return np.zeros((len(texts), VECTOR_DIM), dtype=np.float32)
     keys = [hashlib.sha256(t.encode("utf-8")).hexdigest() for t in texts]
     conn = get_connection()
     placeholders = ",".join("?" * len(keys))

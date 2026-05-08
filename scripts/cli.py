@@ -136,9 +136,10 @@ async def cmd_translate_async(args):
         conn.close()
     except Exception:
         pass
-    skip_rag = corpus_count < 10
+    skip_rag = corpus_count < 10 or not config.RAG_ENABLED
     if skip_rag:
-        print(f"[process] Corpus has {corpus_count} entries (< 10), skipping RAG.")
+        reason = "corpus too small" if corpus_count < 10 else "RAG disabled (embedding model unavailable)"
+        print(f"[process] {reason}, skipping RAG.")
 
     # Migrate DB: add change_type / change_reason if missing
     conn = sqlite3.connect(db_path)
@@ -594,6 +595,24 @@ def cmd_doctor(args):
                 print(f"  API ping: OK ({resp.status})")
         except Exception as e:
             print(f"  API ping: FAIL ({e})")
+
+    # Embedding model
+    emb_spec = importlib.util.find_spec("sentence_transformers")
+    print(f"  sentence_transformers: {'OK' if emb_spec else 'MISSING'}")
+    if emb_spec:
+        from corpus_store import _scan_cached_models
+        cached_models = _scan_cached_models()
+        if len(cached_models) > 1:
+            print(f"  embedding models: {len(cached_models)} found")
+            for name in cached_models:
+                marker = " (current)" if name == config.EMBEDDING_MODEL else ""
+                print(f"    - {name}{marker}")
+        elif len(cached_models) == 1:
+            print(f"  embedding model: {cached_models[0]} (cached)")
+        else:
+            print(f"  embedding model ({config.EMBEDDING_MODEL}): NOT CACHED")
+            print("    hint: run once with internet to download, or set HF_HOME to local mirror")
+            print("    RAG will be disabled until model is available.")
 
     # Directories
     for d in [config.INPUT_DIR, config.OUTPUT_DIR, config.WORKSPACE_DIR, config.LOG_DIR]:

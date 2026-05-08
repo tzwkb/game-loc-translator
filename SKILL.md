@@ -65,11 +65,13 @@ description: Game localization AI agent. Orchestrates source→target translatio
 
 **主 Agent 动作**：指派 ingest-agent 执行启动扫描。
 
-**ingest-agent 回传**：历史参数/空状态、列映射、术语问题、环境状态、参数素材。
+**ingest-agent 回传**：历史参数/空状态、列映射、术语问题、环境状态（含向量化模型状态）、参数素材。
 
 **主 Agent 决策**：
 - 历史存在 → 向 PM 汇报历史参数，确认沿用或调整
 - 术语异常 → 报 PM，确认后继续或修正
+- **多模型** → 向 PM 列出选项，确认使用哪个
+- **无模型** → 向 PM 询问是否下载；拒绝 → 标记 `rag_enabled=false`
 - PM 说"继续"= 确认，进入 Node 1
 
 ---
@@ -146,7 +148,7 @@ description: Game localization AI agent. Orchestrates source→target translatio
 
 | 触发条件 | 决策动作 | 指派对象 |
 |---|---|---|
-| 环境检查失败 | 报 PM，阻塞 | — |
+| 环境检查失败 / 向量化模型未缓存 | 报 PM，阻塞 | — |
 | 术语异常 | 报 PM，确认后继续 | — |
 | PM 说"继续" | 确认参数，进入下一节点 | — |
 | API 连续失败 | 标记 MANUAL | — |
