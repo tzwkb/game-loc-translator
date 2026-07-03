@@ -1,6 +1,6 @@
 # Game Localization Translator
 
-中文 | [English](README.md)
+[English](README.md) | 中文
 
 
 **Agent Skill** — 游戏本地化 AI 翻译与 MTPE 内核，基于术语强制约束、风格指南和 RAG 语料参考执行 ZH→目标语言翻译流程。
