@@ -1,11 +1,24 @@
 # Game Localization Translator
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Agent Skill](https://img.shields.io/badge/Agent%20Skill-Codex-blue.svg)](SKILL.md)
+[![Python](https://img.shields.io/badge/Python-3.x-blue.svg)](https://www.python.org/)
+
 [English](README.md) | 中文
 
+## 文档对齐说明
+
+本 README_ZH.md 与英文 README.md 使用同一项目事实，但采用中文读者更容易扫描的结构。命令、路径、配置键和示例数据保持原样。
+
+## 主要能力
+
+- 支持全新翻译和初译优化两种模式。
+- 用术语表、风格指南和参考语料约束输出。
+- MTPE 模式记录修改类型和修改原因。
+- 可沉淀高质量句对供后续项目参考。
 
 **Agent Skill** — 游戏本地化 AI 翻译与 MTPE 内核，基于术语强制约束、风格指南和 RAG 语料参考执行 ZH→目标语言翻译流程。
 
-**Agent Skill** — RAG-based game-localization translation engine for fresh translation and MTPE, with terminology enforcement, style-guide control, and corpus-backed references.
 
 ---
 
