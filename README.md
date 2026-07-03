@@ -1,6 +1,6 @@
 # Game Localization Translator
 
-[中文](README_ZH.md) | English
+English | [中文](README_ZH.md)
 
 
 ## Overview
@@ -27,7 +27,7 @@
 
 ## Command and Configuration Reference
 
-The following code blocks are preserved from the primary README. Commands, paths, and configuration keys are not translated; adjust them for the actual environment.
+The following code blocks keep commands, paths, filenames, and configuration keys literal; explanatory comments are translated for the English README.
 
 ```
 | id | source                     | key            | locked |
@@ -82,8 +82,8 @@ style
 ```
 
 ```
-翻译 input/game_text.xlsx，术语表用 input/glossary.txt，知识库用 input/kb.txt。
-项目类型 RPG，题材 fantasy，语言对 EN-ZH。
+Translate input/game_text.xlsx, use input/glossary.txt as the glossary, and use input/kb.txt as the knowledge base.
+Project type: RPG; genre: fantasy; language pair: EN-ZH.
 ```
 
 ## Detailed Technical Notes
