@@ -1,43 +1,7 @@
 # Game Localization Translator
 
-<!-- bilingual-readme:start -->
+中文 | [English](README_EN.md)
 
-## 双语说明 / Bilingual Documentation
-
-> 本节提供整篇 README 的中英双语维护说明；下方保留原始详细说明、命令、路径和配置示例。
-> This section provides bilingual maintenance notes for the full README; the original detailed notes, commands, paths, and configuration examples are preserved below.
-
-### 中文
-
-**概览**：游戏本地化 AI 翻译与 MTPE Agent Skill，基于术语强制约束、风格指南和 RAG 语料参考执行翻译流程。
-
-**主要能力**：
-- 支持全新翻译和初译优化两种模式。
-- 使用术语表、风格指南和参考语料控制输出。
-- 面向项目化游戏本地化工作流。
-
-**使用方式**：按 SKILL.md 和 README 中的资源目录、模式和输入格式准备项目资料后调用。
-
-**状态**：该仓库仍按当前 README 的说明维护或使用。
-
-**注意事项**：翻译输出应遵循项目术语、风格和客户要求。
-
-### English
-
-**Overview**: Game-localization translation and MTPE Agent Skill using terminology enforcement, style guides, and RAG references.
-
-**Key capabilities**:
-- Supports fresh translation and draft optimization modes.
-- Controls output with termbases, style guides, and reference corpora.
-- Targets project-based game-localization workflows.
-
-**Usage**: Prepare project resources according to SKILL.md/README directories, modes, and input formats before invoking the skill.
-
-**Status**: This repository is maintained or used according to the current README notes.
-
-**Notes**: Translation output should follow project terminology, style, and client requirements.
-
-<!-- bilingual-readme:end -->
 
 **Agent Skill** — 游戏本地化 AI 翻译与 MTPE 内核，基于术语强制约束、风格指南和 RAG 语料参考执行 ZH→目标语言翻译流程。
 
