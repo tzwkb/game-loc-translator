@@ -20,10 +20,6 @@ English | [中文](README_ZH.md)
 
  Prepare project resources according to SKILL.md/README directories, modes, and input formats before invoking the skill.
 
-## Status
-
- This repository is maintained or used according to the current README notes.
-
 ## Notes
 
  Translation output should follow project terminology, style, and client requirements.
@@ -88,7 +84,3 @@ style
 Translate input/game_text.xlsx, use input/glossary.txt as the glossary, and use input/kb.txt as the knowledge base.
 Project type: RPG; genre: fantasy; language pair: EN-ZH.
 ```
-
-## Detailed Technical Notes
-
-This README keeps the English version of the core documentation. Code blocks, paths, commands, and file-layout examples are kept literal so they can be copied and checked against the repository.
