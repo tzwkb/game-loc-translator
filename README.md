@@ -1,6 +1,8 @@
 # Game Localization Translator
 
-基于 RAG 的游戏本地化 AI 翻译内核模块。支持全新翻译（Mode A）与人工初译优化（Mode B）双模式，具备术语强制约束、知识库风格控制、RAG 语料参考三层资源体系。
+**Agent Skill** — 游戏本地化 AI 翻译与 MTPE 内核，基于术语强制约束、风格指南和 RAG 语料参考执行 ZH→目标语言翻译流程。
+
+**Agent Skill** — RAG-based game-localization translation engine for fresh translation and MTPE, with terminology enforcement, style-guide control, and corpus-backed references.
 
 ---
 
